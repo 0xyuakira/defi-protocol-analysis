@@ -4,11 +4,11 @@
 
 <img src="images/Uniswap01.png" alt="uniswap价格曲线" width="50%" height="50%">
 
-_在实际交易中，价格并不是按照$x/y$ 或者 $y/x$来计算，而是围绕着：$x \cdot y = k$，K 值应该保持不变来计算价格。所以其价格变化应该是类似于上面的价格曲线。_
+_上图是忽略手续费时的储备曲线$y = k/x$，图中交易前后的点表示储备状态，沿曲线交易时 k 保持不变。曲线斜率的绝对值$y/x$对应无费边际价格，有限交易量的平均成交价格需要根据$x \cdot y = k$计算。_
 
 ### 数学计算
 
-假设某个交易对有$x$数量的 token A 和$y$数量的 tokenB，有人想用$\Delta x$数量的 token A 兑换 token B，他应该得到的 token B 的数量为$\Delta y$,计算过程如下：
+假设某个交易对有$x$数量的 token A 和$y$数量的 token B，有人想用$\Delta x$数量的 token A 兑换 token B，他应该得到的 token B 的数量为$\Delta y$，先忽略手续费和整数舍入，计算过程如下：
 
 $$
 (x + \Delta x)(y - \Delta y) = x y
@@ -26,23 +26,23 @@ $$
 \Delta y = \frac{y(\Delta x \cdot 99.7\%)}{x+ (\Delta x \cdot 99.7\%)} = \frac{997y\Delta x}{1000x + 997\Delta x}
 $$
 
-由于这部分手续费是留存在池子中的，所以实际中的 K 值并不是始终不变的，而是随着交易次数逐渐增加的。增加的这部分流动性实际就是 LP 的收益。
+由于这部分手续费留在池子中，实际储备乘积 k 会随着交易增长，为 LP 带来手续费收益；开启协议费时，其中一部分归协议，具体见 [mintFee 章节](UniswapV2-mintFee.md)。
 
 ### Price Impact
 
-从上面推导的公式，我们可以看到实际成交的价格并不是 $\frac{y}{x}$,而是下面这个公式：
+从上面含手续费的公式，我们可以得到平均成交价格，也就是每个 token A 能换到的 token B 数量（忽略整数舍入）：
 
 $$
-\frac{\Delta y}{\Delta x} = \frac{y\Delta x}{(x+ \Delta x) \cdot \Delta x} = \frac{y}{x + \Delta x}
+\frac{\Delta y}{\Delta x} = \frac{997y\Delta x}{(1000x + 997\Delta x) \cdot \Delta x} = \frac{997y}{1000x + 997\Delta x}
 $$
 
 可以看到
 
 $$
-\frac{y}{x + \Delta x} < \frac{y}{x}
+\frac{997y}{1000x + 997\Delta x} < \frac{y}{x}
 $$
 
-价格变化并不是线性的，而是随着交易量$\Delta x$的增长，边际变化越来越不利，这种现象就是 price impact。表现就是“越买越贵，越卖越便宜”，这种现象本质上和价格需求理论是一致的，也是理想的市场运作方式。如此简单的公式保证了如此强大的机制！
+在手续费率固定的情况下，交易量$\Delta x$越大，平均成交价格越低，即每个 token A 能换到的 token B 越少，这种由交易量引起的价格变化就是 price impact。表现就是“越买越贵，越卖越便宜”。
 
 ## 代码解析
 
@@ -58,7 +58,12 @@ if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, 
 
 - `optimistically transfer tokens`,也就是池子在假设交易会成功的前提下，先进行转账，在后续再验证交易条件。
 - 可以转出一种代币，也可以同时转出两种代币（双边 swap）
-- 也可以作为闪电贷使用，`to`合约必须实现`uniswapV2Call`函数，作为回调函数，在`uniswapV2Call`函数中，用户可以自定义一些操作，且必须在最后偿还贷款和费用，否则后续验证交易条件阶段会 revert。
+- 也可以作为闪电贷使用。当`data`非空时，`to`合约必须实现`uniswapV2Call`回调函数。用户可以在回调中自定义操作，并在回调返回前向 Pair 支付足够的 token，否则后续校验会 revert，整个交易回退。
+- 回调合约应验证`msg.sender`是可信 Factory 创建的对应 Pair，并按业务要求限制`sender`（调用`swap`的地址），避免被伪造回调或未授权调用。
+
+只借出并归还同一种代币时，归还量至少为$\lceil 1000 \cdot \text{借出量} / 997 \rceil$，不计整数舍入时，相对借出量的费用约为 0.3009027%。如果用另一种代币支付，则按普通 swap 的含费报价计算所需输入量。
+
+Pair 的`lock`阻止同一个 Pair 的`mint`、`burn`、`swap`、`skim`、`sync`在调用完成前被重入，但不阻止回调操作其他 Pair。
 
 ### 2. 计算转入 token 的数量
 
@@ -70,7 +75,7 @@ uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amo
 require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
 ```
 
-这段代码是计算用户转入了 token 的数量。`_reserve0`和`_reserve1`是池子合约中记录的旧的储备数量，`balance0`和`balance1`是代表池子合约储备的最新余额。`_reserve - amountOut`即原本的数量减去池子转出的数量，也就是池子应该剩下的数量。如果最新的余额大于这个数量，那么说明用户有转入 token，否则 amountIn 等于 0。最后校验了用户至少转入了一种 token。
+这段代码计算转入 token 的数量。`_reserve0`和`_reserve1`是池子合约中记录的旧储备，`balance0`和`balance1`是转出及回调完成后的实际余额。`_reserve - amountOut`即原储备减去池子转出的数量。如果实际余额大于这个数量，差额就计为输入，否则 amountIn 等于 0。最后校验至少有一种 token 输入。Pair 不记录输入资产的专属所有者，因此普通 swap 的转账与`swap`调用需要在同一笔交易中完成，并让失败整体回退。
 
 ### 3. 校验 K 值
 
@@ -80,12 +85,12 @@ uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
 require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
 ```
 
-uniswapV2 每次 swap 都会对`amountIn`收取 0.3%的手续费，恒定乘积公式的计算中不会包含这部分手续费，也就是说用户必须保证 amountIn 在减去了手续费后满足恒定乘积公式。从这里我们可以看到，实际中的 K 并不是不变的，而是因为手续费的增加而增长的。增长的这部分流动性实际就是 LP 的收益。除了手续费，还有其他原因导致的池子流动性增加，比如有用户在 swap 的过程中转入了过多的 token，但协议并不想阻止这种行为，因为它让 LP 赚了钱。（这与 router 中的一项检查有关，通过 router 与协议交互，将会检查转入和收到的数量，避免交易者的损失）。所以在最后 require 中，协议只会检查扣除了手续费 swap 后的 K 值只需要大于或等于原本的 K 值。
+这段代码从实际余额中扣除输入量的 0.3% 后，检查两侧调整后余额的乘积不小于原储备乘积。使用`>=`也允许转入量超过最低所需；Pair 只校验这个下界，不会自动退还多转入的资产。Router 根据报价组织输入，并检查用户指定的最小输出或最大输入。
 
-上面代码使用了一种巧妙的方法，用乘法代替了除法，这是因为 solidity 中除法存在舍入截断，结果会不够精确。
+这里将两侧同乘$1000^2$，用整数乘法完成校验，避免除法截断影响比较结果。
 
 ### 4. 更新池子状态
 
 <img src="images/Uniswap03.jpg" alt="uniswap源码" width="50%" height="50%">
 
-首先检查最新的余额有没有超过池子可以记录的最大值。池子允许记录的最大值是`uint112(-1)`。然后更新了价格累积器（会在后面价格预言机提到）。最后更新了池子的`reserve`。
+首先检查最新的余额有没有超过池子可以记录的最大值`uint112(-1)`。然后使用旧储备更新价格累积器（见 [TWAP 章节](UniswapV2-TWAP.md)），最后将实际余额写入池子的`reserve`。
