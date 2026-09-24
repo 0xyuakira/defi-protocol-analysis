@@ -1,6 +1,6 @@
 # Uniswap V3 Swap
 
-在 V2 中，swap 逻辑非常简洁：池子合约维护了两种资产储备数量，利用恒定乘积公式 $x \cdot y = k$ ，就可以一步推导出任意一次兑换的结果。但是在 V3 中，流动性不是全局恒定的，而是随着价格区间的不同分段变化的。合约也不再存储 token 的数量，选择存储的状态变量是：
+在 V2 中，swap 逻辑非常简洁：池子合约维护了两种资产储备数量，利用恒定乘积公式 $x \cdot y = k$ ，就可以一步推导出任意一次兑换的结果。但是在 V3 中，流动性不是全局恒定的，而是随着价格区间的不同分段变化的。Pool 不再像 V2 一样维护`reserve0/reserve1`，区间报价主要使用的状态变量是：
 
 - liquidity ：当前价格所在的 tick 区间的流动性
 - sqrtPriceX96 ：当前价格 $\sqrt{P}$的定点数
@@ -13,21 +13,21 @@
 
 这样设计的好处也是显而易见的：
 
-- 在同一个区间内部 swap，只需要更新 $\sqrt{P}$ , 不需要维护 token 的数量
+- 区间内的价格推进只需更新 $\sqrt{P}$，不需要维护 V2 那样的储备变量
 - 跨区间的时候，只需要计算下一个区间的流动性，而不是调整每个区间的 token 数量
-- 上面两点不仅仅减少了合约复杂度，同时也节省了大量 gas，而 token 的数量随时可以用 $\sqrt{P}$ 和 $L$ 的公式推导出来
+- 上面两点不仅仅减少了合约复杂度，同时也节省了大量 gas，而区间内的兑换数量可以由价格变化和 $L$ 推导；当前价格和活跃 $L$ 不能还原全池真实余额
 
 ## 数学模型
 
 <img src="images/sadkmska.png" alt="uniswapV3 swap模型" width="50%" height="50%">
 
-因为 V3 的 swap，是一个逐区间推进的过程，每一段 tick 区间内的数学模型都是一样的，所以我们分析 swap 的数学模型的前提是在同一个区间内 swap。假设存在交易对 (x,y)，价格区间是 $[P_{lower},P_{upper}]$ ，此区间的全局流动性为 $L$ 。
+因为 V3 的 swap，是一个逐区间推进的过程，每一段 tick 区间内的数学模型都是一样的，所以我们分析 swap 的数学模型的前提是在同一个区间内 swap。假设存在交易对 (x,y)，价格取 $P=y/x$，价格区间是 $[P_{lower},P_{upper}]$，此区间的活跃流动性 $L>0$ 且保持不变。以下忽略整数舍入，输入数量均指扣除手续费后的净输入。
 
 1. 卖出 y，得到 x
 
-当前市场价格为 $P_b$，我们卖出 $\Delta y$ 数量的 y token，计算我们该得到多少数量的 x token？
+当前市场价格为 $P_b$，卖出的 y token 扣除手续费后净输入为 $\Delta y$，计算我们该得到多少数量的 x token？
 
-假设我们卖出 $\Delta y$ 数量的 y token，导致市场价格上涨至 $P_a$ ，则有：
+假设这笔净输入使市场价格上涨至 $P_a$，则有：
 
 $$
 \Delta y = y_a - y_b = L(\sqrt{P_a} - \sqrt{P_b})
@@ -47,9 +47,9 @@ $$
 
 2. 卖出 x，得到 y
 
-当前市场价格为 $P_a$ ，我们卖出 $\Delta x$ 数量的 x token，计算我们该得到多少数量的 y token？
+当前市场价格为 $P_a$，卖出的 x token 扣除手续费后净输入为 $\Delta x$，计算我们该得到多少数量的 y token？
 
-假设我们卖出 $\Delta x$ 数量的 x token，导致市场价格下降至 $P_b$ ，则有：
+假设这笔净输入使市场价格下降至 $P_b$，则有：
 
 $$
 \Delta x = x_b - x_a = L(\frac{1}{\sqrt{P_b}} - \frac{1}{\sqrt{P_a}})
@@ -67,7 +67,7 @@ $$
 \Delta y = y_a - y_b = L(\sqrt{P_a} - \sqrt{P_b})
 $$
 
-上面就是 V3 的 swap 数学模型，不管是兑换 x 还是 y，我们总是先推算交易者给池子添加 token 后，价格会变化到哪里？然后再根据价格反推出应该支付给交易者多少 token。如果价格变化后跨越了当前 tick，那么在下一 tick 区间重复同样的步骤，直到 swap 完成。
+上面的推导针对指定输入：先用费后净输入推算新价格，再计算应该支付给交易者多少 token。指定输出则从输出数量反推新价格和所需净输入，再计入手续费。如果剩余数量需要跨越当前区间，就先结算到边界，再在下一 tick 区间重复同样的步骤，直到数量处理完或到达价格限制。
 
 ## 源码实现
 
@@ -86,7 +86,7 @@ function swap(
 - recipient：交易接收地址
 - zeroForOne：交易方向，`true`表示 token0 -> token1,`false`表示 token1 -> token0
 - amountSpecified：指定交易数量， $>0$ 表示指定输入， $<0$ 表示指定输出
-- sqrtPriceLimitX96：交易设置的滑点，合约不会把价格推进超过这个值
+- sqrtPriceLimitX96：交易允许到达的平方根价格边界，合约不会把价格推进超过这个值
 - data：传递给回调`uniswapV3SwapCallback`的字节
 
 ### 2. 前置检查
@@ -125,16 +125,18 @@ SwapCache memory cache = SwapCache({
 
 `SwapCache` 是 swap 开始时的一些环境快照，用来避免在循环里重复读取链上存储。
 
-- liquidityStart：当前市场价格所在的 tick 区间的全局流动性
+- liquidityStart：swap 开始时的活跃流动性
 - blockTimestamp：当前区块时间戳
-- feeProtocol：协议手续费比例。如果是 token0 -> token1，取低四位，如果是 token1 -> token0，取高四位
-- secondsPerLiquidityCumulativeX128：初始化为 0，后续在跨越 tick 时更新，用于 oracle 累计
-- tickCumulative：初始化为 0，后续在跨越 tick 时更新
-- computedLatestObservation：初始化为 false，表示 oracle 数据还没有更新过，在第一次跨越 tick 时重置为 true
+- feeProtocol：协议费的抽成分母，0 表示关闭，n 表示从手续费中抽取 1/n。输入为 token0 时取低四位，输入为 token1 时取高四位
+- secondsPerLiquidityCumulativeX128：初始化为 0，首次跨越已初始化 tick 时计算并缓存截至当前时间的单位流动性秒数累计值
+- tickCumulative：初始化为 0，与上项一起计算并缓存 tick 的时间累计值
+- computedLatestObservation：本次 swap 是否已缓存上述累计值，首次计算后设为 true，后续跨界复用；这里还没有写入 observation
 
 ### 4. 创建状态机
 
 ```solidity
+bool exactInput = amountSpecified > 0;
+
 SwapState memory state =
     SwapState({
         amountSpecifiedRemaining: amountSpecified,
@@ -147,9 +149,9 @@ SwapState memory state =
     });
 ```
 
-`SwapState` 是 在 while 循环中不断更新的状态机。
+`SwapState` 是在 while 循环中不断更新的状态机。
 
-- amountSpecifiedRemaining：剩余待处理的交易数量（输入 or 输出）。随着循环一步步推进会减少
+- amountSpecifiedRemaining：剩余待处理的交易数量，指定输入时为正，指定输出时为负；成交时绝对值向 0 收敛
 - amountCalculated：已经计算出的对手 token 的累计数量。最终会作为 swap 的结果返回。
 - sqrtPriceX96：当前市场 $\sqrt{P}$ 的定点数
 - tick：当前 tick，随着跨越 tick 更新
@@ -163,7 +165,7 @@ SwapState memory state =
     while (state.amountSpecifiedRemaining != 0 && state.sqrtPriceX96 != sqrtPriceLimitX96) {}
 ```
 
-这段 while 循环代码正是 swap 的核心逻辑，直到`amountSpecifiedRemaining`被消耗完，或者价格到达`sqrtPriceLimitX96`限制。
+这段 while 循环代码正是 swap 的核心逻辑，直到`amountSpecifiedRemaining`被消耗完，或者价格到达`sqrtPriceLimitX96`限制。到达价格限制时，Pool 可能只完成部分兑换，实际输入和输出以返回值为准。
 
 ```solidity
             StepComputations memory step;
@@ -187,8 +189,8 @@ SwapState memory state =
 ```
 
 - 初始化`step`，存放这一轮 swap 的中间状态
-- `nextInitializedTickWithinOneWord`按照当前交易方向找到下一个已初始化的 tick，如果没找到就用`MIN_TICK`,`MAX_TICK`兜底
-- 计算下一个 初始化的 tick 的 sqrtPriceX96
+- `nextInitializedTickWithinOneWord`按照当前交易方向在一个 word 内查找已初始化 tick；未找到时返回该次查询的 word 边界和`initialized=false`，再将结果裁剪到`[MIN_TICK, MAX_TICK]`范围内
+- 计算本次返回的 tick 的 sqrtPriceX96
 
 ```solidity
 (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
@@ -202,7 +204,11 @@ SwapState memory state =
             );
 ```
 
-`SwapMath.computeSwapStep`这个函数就是对上面数学模型的实现，他的核心就是传入下一个 tick 端点的价格，计算剩下的 amountSpecified 能不能消耗完，如果能消耗完，swap 到这轮就结束了 ，用剩下的 amountSpecified 计算出一个新的价格，再推导出这轮 swap 的 amountOut 和手续费。如果消耗不完，说明还要进行下一个 tick 区间的 swap，那么就按照当前区间的端点 tick，算出这轮 swap 消耗了多少 amountSpecified，对应的 amountOut 和手续费。
+`SwapMath.computeSwapStep`实现单步计算，目标价格取沿交易方向更近的 tick 边界或`sqrtPriceLimitX96`。指定输入时，先扣除手续费，再判断净输入能否到达目标；指定输出时，先比较剩余输出需求与到达目标可支付的数量，再反推价格和所需输入。数量不足以到达目标时，在区间内结束本步；到达 tick 边界且仍有剩余数量时继续推进；到达价格限制时结束 swap。
+
+数量计算中，可用净输入向下取整，应收的`amountIn`向上取整，可付的`amountOut`向下取整，指定输出还会限制`amountOut`不超过剩余需求。指定输入且未到目标价格时，剩余输入与实际`amountIn`的差额作为本步手续费；其余分支按`amountIn * feePips / (1e6 - feePips)`向上取整计算手续费。
+
+遇到 $L=0$ 的空区间时，不能直接套用上面除以 $L$ 的公式。此时本步输入、输出和手续费均为 0，价格推进到目标，继续查找后续流动性，或在到达价格限制时结束。
 
 ```solidity
             if (exactInput) {
@@ -273,15 +279,15 @@ if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
 
 - 如果价格到达 tick 边界：
 
-  执行 ticks.cross 更新流动性，
+  只有边界已初始化时，才调用`ticks.cross`翻转 outside 累计值并取回`liquidityNet`，再由调用方按穿越方向调整符号、更新活跃流动性。
 
-  tick 设置为边界（tickNext 或 tickNext-1）。
+  向右到达边界 i 时记录 tick=i，向左时记录 tick=i−1，表示跨界后所在的一侧。因此，最终记录的`slot0.tick`不一定等于`getTickAtSqrtRatio(sqrtPriceX96)`，不能直接用后者替换。
 
-- 如果价格没到边界：
+- 如果价格没到边界且发生了变化：
 
   根据新价格反推当前 tick
 
-#### 更新 solt 状态
+#### 更新 slot0 状态
 
 ```solidity
  if (state.tick != slot0Start.tick) {
@@ -319,7 +325,7 @@ if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
         }
 ```
 
-循环结束后，将新区间的 liquidity，新的当前价格，新的 tick 写入全局状态，并更新全局手续费，和协议费用。预言机部分将会在另外的章节中学习。
+循环结束后，将活跃 liquidity、当前价格和 tick 写入全局状态，并更新手续费累计和协议费用。如果 tick 发生变化，还会调用`observations.write`，用交易前的 tick 和 liquidity 累计到当前时间；同一时间戳不重复写入。预言机的完整说明见 [Oracle](./UniswapV3-Oracle.md)。
 
 #### 根据交易方向返回 amount0，amount1，转账或回调支付
 

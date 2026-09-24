@@ -12,12 +12,12 @@
 
 1. owner
 
-   - 它是管理员的地址，最初是 Uniswap Labs 控制，现已交给 Uniswap DAO 控制
-   - 它的权限范围只有：启用新的费率档位，转移管理员权限
+   - 它是 Factory 管理员的地址，初始为部署调用者，之后可以通过`setOwner`转移
+   - 它的权限包括：启用新的费率档位，转移管理员权限，以及通过 Pool 的`setFeeProtocol`和`collectProtocol`设置和提取协议费
 
 2. feeAmountTickSpacing
 
-   - 和 V2 不同，在 V3 中一个交易对可以有多个手续费率，这里记录了不同手续费率 和 最小价格单位间隔 的映射，比如：
+   - 和 V2 不同，在 V3 中一个交易对可以有多个手续费率，这里记录了不同手续费率 和 最小价格单位间隔 的映射，构造函数中的初始配置为：
 
      0.05% → tickSpacing = 10
 
@@ -88,7 +88,7 @@ function createPool(
 }
 ```
 
-这里第 6 步，是调用了继承自`UniswapV3PoolDeplover`合约中的`deploy`函数。
+这里第 6 步，是调用了继承自`UniswapV3PoolDeployer`合约中的`deploy`函数。
 
 ```solidity
 contract UniswapV3PoolDeployer is IUniswapV3PoolDeployer {
@@ -128,7 +128,7 @@ contract UniswapV3PoolDeployer is IUniswapV3PoolDeployer {
             salt: keccak256(abi.encode(token0, token1, fee))
         }());
 
-        // 3. 清理 parameters，避免数据残留污染下一次部署
+        // 3. 部署完成后清理临时参数 parameters
         delete parameters;
     }
 }
@@ -148,6 +148,8 @@ contract UniswapV3PoolDeployer is IUniswapV3PoolDeployer {
 
 上面是`UniswapV3Pool`合约的构造函数，可以看到它主动读取了部署者（也就是`UniswapV3Factory`）的 storage 变量`parameters`，然后再写入到自己的配置中。
 
+完整流程是`createPool → initialize(sqrtPriceX96) → mint`。`initialize`设置初始价格和 Oracle 状态，只能成功调用一次，无需 owner 权限，也不会注入流动性。NPM 继承的`PoolInitializer.createAndInitializePoolIfNecessary`可以按需衔接创建与初始化。
+
 ## enableFeeAmount
 
 ```solidity
@@ -155,7 +157,7 @@ function enableFeeAmount(uint24 fee, int24 tickSpacing) public override {
     // 只有管理员(owner)可以启用新的手续费档位
     require(msg.sender == owner);
 
-    // 手续费不能超过 100%（单位为百万分之一）
+    // 手续费必须小于 100%（单位为百万分之一）
     require(fee < 1000000);
 
     // 限制 tick 间隔在合理范围 [1, 16383]
@@ -173,4 +175,4 @@ function enableFeeAmount(uint24 fee, int24 tickSpacing) public override {
 }
 ```
 
-这个函数很简单，也是 owner 唯一的权限，增加新的手续费率和对应的 `tickSpacing`.
+这个函数由 owner 调用，用于增加新的手续费率和对应的 `tickSpacing`，不会修改现有 Pool 的固定费率和 tick 间隔。
