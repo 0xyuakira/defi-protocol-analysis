@@ -18,7 +18,7 @@
 
 ## 数学模型
 
-<img src="images/uniswapV3-03.png" alt="uniswapV3 计算流动性" width="50%" height="50%">
+<img src="images/uniswapV3-06.png" alt="uniswapV3 计算流动性" width="50%" height="50%">
 
 假设存在交易对 (x,y)，LP 设定添加流动性的区间为 $[P_{lower},P_{upper}]$ , 当前市场价格为 $P$ , 在 $P$ 点头寸对应的资产数量为 $\Delta x$ , $\Delta y$ 。然后我们分析以下三种情况：
 

@@ -24,7 +24,7 @@ $$
 
 下图用平方根价格 $\sqrt{P(i)}=1.0001^{i/2}$ 的近似值展示 tick 刻度：
 
-<img src="images/uniswapV3-04.png" alt="tick平方根价格刻度" width="50%" height="30%">
+<img src="images/uniswapV3-03.png" alt="tick平方根价格刻度" width="50%" height="30%">
 
 ### 为什么要这么做？
 
@@ -48,7 +48,7 @@ $$
 
 #### 常量
 
-<img src="images/uniswapV3-05.png" alt="TickMath源码" width="70%" height="70%">
+<img src="images/uniswapV3-04.png" alt="TickMath源码" width="70%" height="70%">
 
 在了解图中定义的常量前，我们需要了解一点，uniswapV3 中实际上并不会使用到价格，而是 $\sqrt{P}$ 。因为在流动性计算和 swap 的数学计算中，使用到更多的是 $\sqrt{P}$ ，并且平方根计算并不精确，会引入取整的问题，所以干脆就在合约中存平方根的结果，而不是计算它。
 
@@ -450,7 +450,7 @@ uniswapV3 的办法是：使用 bitmap 这种数据结构来存储 tick 的状�
 - 先按 tickSpacing 压缩 tick（查询时向下取整），再将压缩索引右移 8 位得到 wordPosition，取低 8 位得到 bitPosition
 - wordPosition 对应 tickBitmap 中 int16 的键，再在对应的 uint256 位图中找到下标为 bitPosition 的位置，如果这个 tick 已经初始化流动性，则该位为 1，反之为 0
 
-<img src="images/uniswapV3-06.png" alt="uniswapV3 bitMap" width="50%" height="50%">
+<img src="images/uniswapV3-05.png" alt="uniswapV3 bitMap" width="50%" height="50%">
 
 > 💡 **PS：**
 > 这里说的 tick 初始化流动性，指的是**该 tick 被用作流动性区间边界**，也就是 LP 选择的 tickLower、tickUpper。uniswapV3 使用差分数组的思想，在端点记录流动性变化量，跨越端点时累加差分；TickBitmap 则提供索引，快速定位下一个“差分点”。
